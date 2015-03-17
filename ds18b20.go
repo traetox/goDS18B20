@@ -1,15 +1,16 @@
 package ds18b20
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
+	"io/ioutil"
 	"os"
-	//"path"
+	"os/exec"
+	"path"
+	"strconv"
 	"strings"
 	"sync"
-	//"strconv"
-	"io/ioutil"
-	"os/exec"
 )
 
 const (
@@ -25,6 +26,10 @@ var (
 	errClosed   = errors.New("Closed")
 	errNoBus    = errors.New("1 Wire master bus not present")
 	errNotReady = errors.New("Not ready")
+	errNoSlaves = errors.New("No temerature probes found")
+	errNotFound = errors.New("not found")
+	errCRCError = errors.New("CRC error")
+	errFormat   = errors.New("Invalid sensor output format")
 )
 
 type Temperature float32
@@ -38,7 +43,7 @@ type Probe struct {
 }
 
 type ProbeGroup struct {
-	pbs []Probe
+	pbs []*Probe
 	mtx *sync.Mutex
 }
 
@@ -86,41 +91,139 @@ func Slaves() ([]string, error) {
 			if (fis[i].Mode() & os.ModeSymlink) == os.ModeSymlink {
 				slaves = append(slaves, fis[i].Name())
 			}
-		} else {
-			fmt.Printf("Not a slave: %v\n", fis[i].Name())
 		}
 	}
 	return slaves, nil
 }
 
 func New() (*ProbeGroup, error) {
-	return nil, errNotReady
+	var pbs []*Probe
+	//get list of potential slaves
+	slaves, err := Slaves()
+	if err != nil {
+		return nil, err
+	}
+	if len(slaves) == 0 {
+		return nil, errNoSlaves
+	}
+	for i := range slaves {
+		pb, err := NewProbe(slaves[i])
+		if err != nil {
+			return nil, err
+		}
+		pbs = append(pbs, pb)
+	}
+	return &ProbeGroup{
+		pbs: pbs,
+		mtx: &sync.Mutex{},
+	}, nil
 }
 
 func (pg *ProbeGroup) Close() error {
-	return errNotReady
+	pg.mtx.Lock()
+	defer pg.mtx.Unlock()
+	if pg.pbs == nil {
+		return errClosed
+	}
+	for i := range pg.pbs {
+		if err := pg.pbs[i].Close(); err != nil {
+			return err
+		}
+	}
+	pg.pbs = nil
+	return nil
 }
 
 func (pg *ProbeGroup) ReadSingle(id string) (Temperature, error) {
-	return -1.0, errNotReady
+	pg.mtx.Lock()
+	defer pg.mtx.Unlock()
+	if pg.pbs == nil {
+		return -1.0, errClosed
+	}
+	for i := range pg.pbs {
+		if pg.pbs[i].id == id {
+			return pg.pbs[i].Temperature()
+		}
+	}
+	return -1.0, errNotFound
 }
 
 func (pg *ProbeGroup) ReadSingleAlias(alias string) (Temperature, error) {
-	return -1.0, errNotReady
+	pg.mtx.Lock()
+	defer pg.mtx.Unlock()
+	if pg.pbs == nil {
+		return -1.0, errClosed
+	}
+	for i := range pg.pbs {
+		if pg.pbs[i].alias == alias {
+			return pg.pbs[i].Temperature()
+		}
+	}
+	return -1.0, errNotFound
 }
 
 func (pg *ProbeGroup) Read() (map[string]Temperature, error) {
-	return nil, errNotReady
-
+	pg.mtx.Lock()
+	defer pg.mtx.Unlock()
+	if pg.pbs == nil {
+		return nil, errClosed
+	}
+	r := make(map[string]Temperature, 1)
+	for i := range pg.pbs {
+		t, err := pg.pbs[i].Temperature()
+		if err != nil {
+			return nil, err
+		}
+		r[pg.pbs[i].id] = t
+	}
+	return r, nil
 }
 
 func (pg *ProbeGroup) ReadAlias() (map[string]Temperature, error) {
-	return nil, errNotReady
-
+	pg.mtx.Lock()
+	defer pg.mtx.Unlock()
+	if pg.pbs == nil {
+		return nil, errClosed
+	}
+	r := make(map[string]Temperature, 1)
+	for i := range pg.pbs {
+		t, err := pg.pbs[i].Temperature()
+		if err != nil {
+			return nil, err
+		}
+		if pg.pbs[i].alias == "" {
+			continue
+		}
+		r[pg.pbs[i].alias] = t
+	}
+	return r, nil
 }
 
-func (p *Probe) NewProbe(alias string) (*Probe, error) {
-	return nil, errNotReady
+func (pg *ProbeGroup) Update() error {
+	pg.mtx.Lock()
+	defer pg.mtx.Unlock()
+	if pg.pbs == nil {
+		return errClosed
+	}
+	for i := range pg.pbs {
+		if err := pg.pbs[i].Update(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func NewProbe(id string) (*Probe, error) {
+	fio, err := os.Open(path.Join(path.Join(basePath, id), "w1_slave"))
+	if err != nil {
+		return nil, err
+	}
+	return &Probe{
+		currC: 0.0,
+		fio:   fio,
+		mtx:   &sync.Mutex{},
+		id:    id,
+	}, nil
 }
 
 func (p *Probe) Temperature() (Temperature, error) {
@@ -141,13 +244,41 @@ func (p *Probe) Update() error {
 	if _, err := p.fio.Seek(0, 0); err != nil {
 		return err
 	}
+	bio := bufio.NewReader(p.fio)
 
 	//read first line with CRC
-	//pull CRC and check it
-	//read second line with temparture
-	//pull temparture and convert it
+	ln, err := bio.ReadString('\n')
+	if err != nil {
+		return err
+	}
+	ln = strings.TrimRight(ln, "\n")
 
-	return errNotReady
+	//pull CRC and check it
+	if !strings.HasSuffix(ln, "YES") {
+		return errCRCError
+	}
+
+	//read second line with temparture
+	ln, err = bio.ReadString('\n')
+	if err != nil {
+		return err
+	}
+	ln = strings.TrimRight(ln, "\n")
+	//pull temparture and convert it
+	bits := strings.Split(ln, "t=")
+	if len(bits) != 2 {
+		return errFormat
+	}
+	t, err := strconv.ParseUint(bits[1], 10, 32)
+	if err != nil {
+		return err
+	}
+
+	//got a good read, convert it
+	temp := float32(t)
+	temp = temp / 1000.0
+	p.currC = temp
+	return nil
 }
 
 func (p *Probe) Close() error {
