@@ -134,6 +134,21 @@ func (pg *ProbeGroup) Close() error {
 	return nil
 }
 
+func (pg *ProbeGroup) AssignAlias(alias, id string) error {
+	pg.mtx.Lock()
+	defer pg.mtx.Unlock()
+	if pg.pbs == nil {
+		return errClosed
+	}
+	for i := range pg.pbs {
+		if pg.pbs[i].id == id {
+			pg.pbs[i].alias = alias
+			return nil
+		}
+	}
+	return errNotFound
+}
+
 func (pg *ProbeGroup) ReadSingle(id string) (Temperature, error) {
 	pg.mtx.Lock()
 	defer pg.mtx.Unlock()
