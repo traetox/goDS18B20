@@ -1,4 +1,4 @@
-package ds18b20
+package goDS18B20
 
 import (
 	"bufio"
