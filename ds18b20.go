@@ -183,6 +183,9 @@ func (pg *ProbeGroup) Read() (map[string]Temperature, error) {
 	if pg.pbs == nil {
 		return nil, errClosed
 	}
+	if err := pg.update(); err != nil {
+		return nil, err
+	}
 	r := make(map[string]Temperature, 1)
 	for i := range pg.pbs {
 		t, err := pg.pbs[i].Temperature()
@@ -199,6 +202,9 @@ func (pg *ProbeGroup) ReadAlias() (map[string]Temperature, error) {
 	defer pg.mtx.Unlock()
 	if pg.pbs == nil {
 		return nil, errClosed
+	}
+	if err := pg.update(); err != nil {
+		return nil, err
 	}
 	r := make(map[string]Temperature, 1)
 	for i := range pg.pbs {
@@ -217,6 +223,10 @@ func (pg *ProbeGroup) ReadAlias() (map[string]Temperature, error) {
 func (pg *ProbeGroup) Update() error {
 	pg.mtx.Lock()
 	defer pg.mtx.Unlock()
+	return pg.update()
+}
+
+func (pg *ProbeGroup) update() error {
 	if pg.pbs == nil {
 		return errClosed
 	}
