@@ -294,7 +294,7 @@ func (p *Probe) Update() error {
 	if len(bits) != 2 {
 		return errFormat
 	}
-	t, err := strconv.ParseUint(bits[1], 10, 32)
+	t, err := strconv.ParseInt(bits[1], 10, 32)
 	if err != nil {
 		return err
 	}
